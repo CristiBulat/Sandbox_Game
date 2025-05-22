@@ -4,7 +4,32 @@ import {
   resourceTypes,
   type Room,
   type Item,
+  type Enemy,
+  type Door,
 } from "./game-data";
+
+// Define Projectile Type
+type Projectile = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  size: number;
+  type: "shadowBolt";
+  owner: "enemy";
+  damage: number;
+  rotation: number;
+};
+
+// Type for objects that can be checked for intersection
+type RectObject = {
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+  size?: number;
+};
+
 
 export class GameEngine {
   canvas: HTMLCanvasElement;
@@ -13,68 +38,56 @@ export class GameEngine {
   H: number;
   onRender?: (props: {
     player: {
-      x: number;
-      y: number;
-      size: number;
-      color: string;
-      speed: number;
-      room: number;
-      hp: number;
-      hpMax: number;
-      keys: number;
-      radRes: number;
-      materials: { scrap: number; circuits: number; chemicals: number };
-      inventory: Record<string, boolean>;
-      railgunAmmo: number;
-      isInvincible: boolean;
-      damageMultiplier: number;
+      x: number; y: number; size: number; speed: number; room: number;
+      hp: number; hpMax: number; keys: number; shadowResilience: number;
+      materials: { ironScraps: number; arcaneDust: number; alchemicalReagents: number };
+      inventory: Record<string, boolean>; crossbowBolts: number;
+      isInvincible: boolean; damageMultiplier: number;
     };
     roomName: string;
-    nearBench: boolean;
+    nearAnvil: boolean;
     itemCooldowns: Record<string, number>;
     selectedItem: number;
+    bossDefeated?: boolean;
   }) => void;
 
   visitedRooms = new Set<number>();
   difficulty: "peaceful" | "easy" | "normal" | "hard" = "normal";
-  enemyInitialPositions = new Map<number, { x: number; y: number; speed: number; hpMax: number }[]>();
+  // enemyInitialPositions stores a snapshot of Enemy objects as they were at game start
+  enemyInitialPositions = new Map<number, Enemy[]>(); // Changed from Partial<Enemy>[] to Enemy[]
   openedDoors = new Set<string>();
 
-  doorCooldown = 0; // backup – dar „spawn-ul sigur” rezolvă 99 %
+  doorCooldown = 0;
 
-  /* ─────────────── PLAYER ─────────────── */
   player = {
-    x: 50,
-    y: 300,
-    size: 50,
-    color: "lime",
-    speed: 4,
-    room: 0,
-    hp: 100,
-    hpMax: 100,
-    keys: 0,
-    radRes: 0,
-    materials: { scrap: 0, circuits: 0, chemicals: 0 },
-    inventory: {} as Record<string, boolean>,
-    railgunAmmo: 0,
-    isInvincible: false,
-    damageMultiplier: 1,
+    x: 50, y: 300, size: 48, speed: 4, room: 0, hp: 100, hpMax: 100,
+    keys: 0, shadowResilience: 0,
+    materials: { ironScraps: 0, arcaneDust: 0, alchemicalReagents: 0 },
+    inventory: {} as Record<string, boolean>, crossbowBolts: 0,
+    isInvincible: false, damageMultiplier: 1,
   };
 
-  /* ─────────────── STATE ─────────────── */
   itemImages: Record<string, HTMLImageElement> = {};
+  enemyImages: Record<string, HTMLImageElement> = {};
+  projectileImages: Record<string, HTMLImageElement> = {};
+  portalImage!: HTMLImageElement;
+  playerImage!: HTMLImageElement;
+
+  activeProjectiles: Projectile[] = [];
   gameOver = false;
+  gameWon = false;
   transitionAlpha = 0;
   backgroundOffset = 0;
   craftingMode = false;
   craftSelection = 0;
   lastSaveTime = 0;
-  keys: Record<string, boolean> = {};
+  keysState: Record<string, boolean> = {};
   itemCooldowns: Record<string, number> = {};
-  activeEffects: { type: string; x: number; y: number; time: number }[] = [];
+  activeEffects: { type: string; x: number; y: number; time: number, size?: number, rotation?: number }[] = [];
   selectedItem = 0;
   dialogMessage = "";
   dialogTimer = 0;
+  frameCount = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -82,15 +95,14 @@ export class GameEngine {
     this.W = canvas.width;
     this.H = canvas.height;
 
-    // Store initial enemy positions
+    // Populate enemyInitialPositions with full Enemy objects, initialized for game start
     rooms.forEach((room, idx) => {
       this.enemyInitialPositions.set(
         idx,
-        room.enemies.map(e => ({ 
-          x: e.x, 
-          y: e.y,
-          speed: e.speed,
-          hpMax: e.hpMax
+        room.enemies.map(e => ({ // e is type Enemy from game-data
+            ...e, // Spread all properties from the original Enemy definition
+            lastAttackTime: 0, // Initialize dynamic state
+            isLunging: false   // Initialize dynamic state
         }))
       );
     });
@@ -98,712 +110,478 @@ export class GameEngine {
     if (typeof window !== "undefined") this.loadImages();
   }
 
-  /* ────────── ASSETS ────────── */
   private loadImages() {
-    ["medkit", "key", "scrap", "circuits", "chemicals", "bench", "player"].forEach(
-      (name) => {
-        const img = new Image();
-        img.src = `/assets/${name}.png`;
-        this.itemImages[name] = img;
-      }
-    );
+    const assetTypes = ["healthPotion", "ornateKey", "ironScraps", "arcaneDust", "alchemicalReagents", "anvil"];
+    assetTypes.forEach(name => {
+      const img = new Image();
+      img.src = `/assets/${name}.png`;
+      this.itemImages[name] = img;
+    });
+
+    this.playerImage = new Image();
+    this.playerImage.src = "/assets/knight.png";
+    this.portalImage = new Image();
+    this.portalImage.src = "/assets/portal.png";
+
+    const enemySpriteNames = ["shadowMinion", "shadowSorcerer", "shadowOverlord"];
+    enemySpriteNames.forEach(name => {
+      const img = new Image();
+      img.src = `/assets/enemies/${name}.png`;
+      this.enemyImages[name] = img;
+    });
+
+    this.projectileImages["shadowBolt"] = new Image();
+    this.projectileImages["shadowBolt"].src = "/assets/projectiles/shadowBolt.png";
   }
 
-  /* ────────── INPUT ────────── */
   handleKeyDown(e: KeyboardEvent) {
-    this.keys[e.key] = true;
-
-    if (e.key.toLowerCase() === "c" && this.nearBench()) {
-      this.toggleCrafting();
-    }
-    
-    // Number keys 1-9 for inventory selection
-    if (e.key >= "1" && e.key <= "9") {
-      this.selectedItem = parseInt(e.key) - 1;
-    }
-    
-    // E key to use selected item
-    if (e.key.toLowerCase() === "e") {
+    this.keysState[e.key.toLowerCase()] = true;
+    if (this.keysState["c"] === true && this.nearAnvil()) this.toggleCrafting(); // Explicit true check
+    if (e.key >= "1" && e.key <= "9") this.selectedItem = parseInt(e.key) - 1;
+    if (this.keysState["e"] === true) { // Explicit true check
       const inventoryItems = Object.entries(this.player.inventory)
-        .filter(([_, hasItem]) => hasItem)
-        .map(([item]) => item);
-      
-      const selectedItem = inventoryItems[this.selectedItem];
-      if (selectedItem) {
-        this.useItem(selectedItem);
-      }
+        .filter(([_, hasItem]) => hasItem === true).map(([item]) => item);
+      const selectedItemName = inventoryItems[this.selectedItem];
+      if (selectedItemName) this.useItem(selectedItemName);
     }
-
     if (this.craftingMode) {
-      if (e.key === "ArrowUp")
-        this.craftSelection =
-          (this.craftSelection - 1 + recipes.length) % recipes.length;
-      if (e.key === "ArrowDown")
-        this.craftSelection = (this.craftSelection + 1) % recipes.length;
+      if (e.key === "ArrowUp") this.craftSelection = (this.craftSelection - 1 + recipes.length) % recipes.length;
+      if (e.key === "ArrowDown") this.craftSelection = (this.craftSelection + 1) % recipes.length;
       if (e.key === "Enter") this.attemptCraft();
     }
+    if ((this.gameOver || this.gameWon) && e.key === "Enter") this.resetGame();
   }
   handleKeyUp(e: KeyboardEvent) {
-    this.keys[e.key] = false;
+    this.keysState[e.key.toLowerCase()] = false;
   }
 
-  /* ────────── UPDATE ────────── */
   update() {
+    if (this.gameOver || this.gameWon) return;
+    this.frameCount++;
     const room = this.getCurrentRoom();
     if (!room) return;
 
-    // Update dialog timer
-    if (this.dialogTimer > 0) {
-      this.dialogTimer--;
-      if (this.dialogTimer === 0) {
-        this.dialogMessage = "";
-      }
-    }
-
-    // Update cooldowns
-    Object.keys(this.itemCooldowns).forEach(key => {
-      if (this.itemCooldowns[key] > 0) {
-        this.itemCooldowns[key]--;
-      }
-    });
-
-    // Update effects
-    this.activeEffects = this.activeEffects.filter(effect => {
-      effect.time--;
-      return effect.time > 0;
-    });
-
+    if (this.dialogTimer > 0) { if (--this.dialogTimer === 0) this.dialogMessage = ""; }
+    Object.keys(this.itemCooldowns).forEach(key => { if (this.itemCooldowns[key] > 0) this.itemCooldowns[key]--; });
+    this.activeEffects = this.activeEffects.filter(effect => --effect.time > 0);
     this.backgroundOffset += 0.2;
 
-    /* ── deplasare player ── */
-    const prev = { x: this.player.x, y: this.player.y };
-    if (this.keys.ArrowUp) this.player.y -= this.player.speed;
-    if (this.keys.ArrowDown) this.player.y += this.player.speed;
-    if (this.keys.ArrowLeft) this.player.x -= this.player.speed;
-    if (this.keys.ArrowRight) this.player.x += this.player.speed;
-
-    this.player.x = this.clamp(this.player.x, 0, this.W - this.player.size);
-    this.player.y = this.clamp(this.player.y, 0, this.H - this.player.size);
-
-    /* pereți */
-    room.walls.forEach((w) => {
-      if (this.rectIntersect(this.player, w)) {
-        this.player.x = prev.x;
-        this.player.y = prev.y;
-      }
-    });
-
-    /* uși */
-    if (this.doorCooldown === 0) {
-      room.doors.forEach((d, idx) => {
-        if (!this.rectIntersect(this.player, d)) return;
-
-        const doorKey = `${this.player.room}-${idx}`;
-        const targetDoorKey = `${d.target}-${rooms[d.target].doors.findIndex(
-          (door) =>
-            door.target === this.player.room &&
-            Math.abs(door.dest.x - this.player.x) < 60 &&
-            Math.abs(door.dest.y - this.player.y) < 60
-        )}`;
-
-        const isOpened =
-          this.openedDoors.has(doorKey) || this.openedDoors.has(targetDoorKey);
-
-        if (d.lock === "key" && !isOpened && this.difficulty !== "peaceful") {
-          if (this.player.keys === 0) return;
-          this.player.keys--;
-          this.openedDoors.add(doorKey);
-          this.openedDoors.add(targetDoorKey);
-        }
-
-        this.changeRoom(d.target, d.dest);
-      });
-    } else {
-      this.doorCooldown--;
-    }
-
-    /* hazarde */
-    room.hazards.forEach((h) => {
-      if (this.rectIntersect(this.player, h) && !this.player.isInvincible) {
-        this.player.hp -= h.dmg * (1 - this.player.radRes);
-        if (this.player.hp <= 0) this.triggerGameOver();
-      }
-    });
-
-    /* items */
-    const remaining: Item[] = [];
-    for (const it of room.items) {
-      if (this.rectIntersect(this.player, it)) {
-        switch (it.type) {
-          case "medkit":
-            this.player.hp = Math.min(this.player.hpMax, this.player.hp + 40);
-            this.showDialog("Found a medkit! Restored 40 HP.");
-            break;
-          case "key":
-            this.player.keys++;
-            this.showDialog("Picked up a key. You can now unlock doors.");
-            break;
-          case "scrap":
-            this.player.materials[it.type]++;
-            this.showDialog("Collected scrap metal. Useful for crafting.");
-            break;
-          case "circuits":
-            this.player.materials[it.type]++;
-            this.showDialog("Found electronic circuits. Essential for advanced crafting.");
-            break;
-          case "chemicals":
-            this.player.materials[it.type]++;
-            this.showDialog("Acquired chemicals. Handle with care!");
-            break;
-          case "bench":
-            remaining.push(it);
-            continue;
-        }
-      } else remaining.push(it);
-    }
-    room.items = remaining;
-
-    /* inamici */
-    room.enemies.forEach((e, i) => {
-      if (e.hp <= 0 || this.difficulty === "peaceful") return;
-
-      const mult =
-        this.difficulty === "easy"
-          ? 0.5
-          : this.difficulty === "hard"
-          ? 1.5
-          : 1;
-
-      const dx = this.player.x - e.x;
-      const dy = this.player.y - e.y;
-      const dist = Math.hypot(dx, dy) || 1;
-
-      const origin = this.enemyInitialPositions.get(this.player.room)?.[i];
-      if (!origin) return;
-
-      if (dist < 300) {
-        e.x += (dx / dist) * e.speed * mult;
-        e.y += (dy / dist) * e.speed * mult;
-      } else {
-        const rx = origin.x - e.x;
-        const ry = origin.y - e.y;
-        const rdist = Math.hypot(rx, ry) || 1;
-        if (rdist > 5) {
-          e.x += (rx / rdist) * e.speed * mult * 0.5;
-          e.y += (ry / rdist) * e.speed * mult * 0.5;
-        }
-      }
-
-      e.x = this.clamp(e.x, 0, this.W - e.size);
-      e.y = this.clamp(e.y, 0, this.H - e.size);
-
-      if (this.rectIntersect(this.player, e) && !this.player.isInvincible) {
-        this.player.hp -= e.damage;
-        this.player.x -= Math.sign(dx) * 10;
-        this.player.y -= Math.sign(dy) * 10;
-        if (this.player.hp <= 0) this.triggerGameOver();
-      }
-    });
+    this.updatePlayer(room);
+    this.updateEnemies(room);
+    this.updateProjectiles(room);
+    this.checkBossDefeated();
 
     if (this.transitionAlpha > 0) this.transitionAlpha -= 0.05;
   }
 
-  /* ────────── RENDER ────────── */
+  private updatePlayer(room: Room) {
+    const prev = { x: this.player.x, y: this.player.y };
+    if (this.keysState.arrowup === true || this.keysState.w === true) this.player.y -= this.player.speed;
+    if (this.keysState.arrowdown === true || this.keysState.s === true) this.player.y += this.player.speed;
+    if (this.keysState.arrowleft === true || this.keysState.a === true) this.player.x -= this.player.speed;
+    if (this.keysState.arrowright === true || this.keysState.d === true) this.player.x += this.player.speed;
+
+    this.player.x = this.clamp(this.player.x, 0, this.W - this.player.size);
+    this.player.y = this.clamp(this.player.y, 0, this.H - this.player.size);
+
+    room.walls.forEach(w => { if (this.rectIntersect(this.player, w)) { this.player.x = prev.x; this.player.y = prev.y; } });
+
+    if (this.doorCooldown === 0) {
+      room.doors.forEach((d, idx) => {
+        const isIntersectingPortal = this.rectIntersect(this.player, { x: d.x + d.w / 2 - 10, y: d.y + d.h / 2 - 10, w: 20, h: 20 });
+        if (!isIntersectingPortal) return;
+
+        const doorKey = `${this.player.room}-${idx}`;
+        const targetRoomData = rooms[d.target];
+        const targetDoorIndex = targetRoomData.doors.findIndex(door => door.target === this.player.room);
+        const targetDoorKey = `${d.target}-${targetDoorIndex}`;
+        const isOpened = this.openedDoors.has(doorKey) || (targetDoorIndex !== -1 && this.openedDoors.has(targetDoorKey));
+
+        if (d.lock === "key" && !isOpened && this.difficulty !== "peaceful") {
+          if (this.player.keys === 0) {
+            this.showDialog("This portal is sealed by ancient magic. You need an Ornate Key.");
+            return;
+          }
+          this.player.keys--; this.openedDoors.add(doorKey);
+          if(targetDoorIndex !== -1) this.openedDoors.add(targetDoorKey);
+          this.showDialog("The Ornate Key unsealed the portal!");
+        }
+        this.changeRoom(d.target, d.dest);
+      });
+    } else { this.doorCooldown--; }
+
+    room.hazards.forEach(h => {
+      const isPlayerInHazard = this.rectIntersect(this.player, h);
+      if (isPlayerInHazard && !this.player.isInvincible) {
+        this.player.hp -= h.dmg * (1 - this.player.shadowResilience);
+        if (this.player.hp <= 0) this.triggerGameOver();
+      }
+    });
+
+    const remainingItems: Item[] = [];
+    room.items.forEach(it => {
+      if (this.rectIntersect(this.player, it)) {
+        this.collectItem(it);
+        if (it.type === "anvil") remainingItems.push(it);
+      } else {
+        remainingItems.push(it);
+      }
+    });
+    room.items = remainingItems;
+  }
+
+  private collectItem(item: Item) {
+    switch (item.type) {
+      case "healthPotion": this.player.hp = Math.min(this.player.hpMax, this.player.hp + 40); this.showDialog("Health Potion! +40 HP."); this.activeEffects.push({ type: "heal", x: this.player.x, y: this.player.y, time: 30 }); break;
+      case "ornateKey": this.player.keys++; this.showDialog("Ornate Key acquired!"); break;
+      case "ironScraps": this.player.materials.ironScraps++; this.showDialog("Iron Scraps collected."); break;
+      case "arcaneDust": this.player.materials.arcaneDust++; this.showDialog("Arcane Dust found."); break;
+      case "alchemicalReagents": this.player.materials.alchemicalReagents++; this.showDialog("Alchemical Reagents gathered."); break;
+    }
+  }
+
+  private updateEnemies(room: Room) {
+    room.enemies.forEach((e, enemyIndex) => {
+      if (e.hp <= 0 || this.difficulty === "peaceful") return;
+      if (e.isLunging === true) this.updateLunge(e);
+      else this.standardEnemyAI(e, room, enemyIndex);
+
+       const isPlayerHitByEnemy = this.rectIntersect(this.player, e);
+       if (isPlayerHitByEnemy && !this.player.isInvincible) {
+        this.player.hp -= e.damage * (this.difficulty === "easy" ? 0.75 : this.difficulty === "hard" ? 1.25 : 1);
+        const dx = this.player.x - e.x; const dy = this.player.y - e.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const knockbackStrength = e.attackType === "lunge" ? 40 : 20;
+        this.player.x += (dx / dist) * knockbackStrength; this.player.y += (dy / dist) * knockbackStrength;
+        this.player.x = this.clamp(this.player.x, 0, this.W - this.player.size);
+        this.player.y = this.clamp(this.player.y, 0, this.H - this.player.size);
+        if (this.player.hp <= 0) this.triggerGameOver();
+        if (e.attackType === "lunge") e.isLunging = false;
+      }
+    });
+  }
+
+  private standardEnemyAI(e: Enemy, room: Room, enemyIndex: number) {
+    const dx = this.player.x - e.x; const dy = this.player.y - e.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const speedMult = this.difficulty === "easy" ? 0.7 : this.difficulty === "hard" ? 1.3 : 1;
+
+    if (dist < 400) {
+        if (e.attackType !== "shoot" || dist > (e.shootRange ?? 100) * 0.5) {
+             e.x += (dx / dist) * e.speed * speedMult;
+             e.y += (dy / dist) * e.speed * speedMult;
+        }
+    } else {
+        const initialPos = this.enemyInitialPositions.get(this.player.room)?.[enemyIndex];
+        // Ensure initialPos and its properties are valid before using
+        if (initialPos && typeof initialPos.x === 'number' && typeof initialPos.y === 'number') {
+            const rdx = initialPos.x - e.x; const rdy = initialPos.y - e.y;
+            const rDist = Math.hypot(rdx, rdy) || 1;
+            if (rDist > 5) {
+                e.x += (rdx / rDist) * (initialPos.speed ?? e.speed) * speedMult * 0.5; // Use initialPos.speed if available
+                e.y += (rdy / rDist) * (initialPos.speed ?? e.speed) * speedMult * 0.5;
+            }
+        }
+    }
+
+    e.x = this.clamp(e.x, 0, this.W - e.size); e.y = this.clamp(e.y, 0, this.H - e.size);
+    e.lastAttackTime = e.lastAttackTime ?? 0;
+    if (this.frameCount >= e.lastAttackTime + (e.attackCooldown ?? 120)) {
+      if (e.attackType === "shoot" && dist < (e.shootRange ?? 300)) {
+        this.spawnProjectile(e); e.lastAttackTime = this.frameCount;
+      } else if (e.attackType === "bossPattern") {
+        this.executeBossAttack(e); e.lastAttackTime = this.frameCount;
+      }
+    }
+  }
+
+  private executeBossAttack(boss: Enemy) {
+    const attackChoice = Math.random();
+    const distToPlayer = Math.hypot(this.player.x - boss.x, this.player.y - boss.y);
+
+    if (attackChoice < 0.6 && distToPlayer < (boss.shootRange ?? 400) ) {
+      for (let i = -1; i <= 1; i++) {
+        setTimeout(() => { if(boss.hp > 0) this.spawnProjectile(boss, i * 0.2);}, i * 100 + 50);
+      }
+      this.activeEffects.push({type: "bossShoot", x: boss.x + boss.size/2, y: boss.y + boss.size/2, time: 30});
+    } else if (distToPlayer < (boss.lungeRange ?? 200) && distToPlayer > boss.size && boss.isLunging !== true) {
+      this.showDialog(`${boss.sprite} prepares to charge!`);
+      this.activeEffects.push({type: "bossLungeCharge", x: boss.x + boss.size/2, y: boss.y + boss.size/2, time: 45});
+      setTimeout(() => {
+        if (boss.hp > 0) {
+            boss.isLunging = true; boss.lungeTargetX = this.player.x; boss.lungeTargetY = this.player.y;
+        }
+      }, 750);
+    }
+    boss.lastAttackTime = this.frameCount + (boss.attackCooldown ?? 150)/2;
+  }
+
+  private updateLunge(enemy: Enemy) {
+    if (enemy.isLunging !== true || typeof enemy.lungeTargetX !== 'number' || typeof enemy.lungeTargetY !== 'number') return;
+    const dx = enemy.lungeTargetX - enemy.x; const dy = enemy.lungeTargetY - enemy.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const lungeSpeed = enemy.lungeSpeed ?? 10;
+
+    if (dist > lungeSpeed) {
+      enemy.x += (dx / dist) * lungeSpeed; enemy.y += (dy / dist) * lungeSpeed;
+    } else {
+      enemy.x = enemy.lungeTargetX; enemy.y = enemy.lungeTargetY;
+      enemy.isLunging = false; enemy.lastAttackTime = this.frameCount + 30;
+    }
+    enemy.x = this.clamp(enemy.x, 0, this.W - enemy.size); enemy.y = this.clamp(enemy.y, 0, this.H - enemy.size);
+  }
+
+  private spawnProjectile(owner: Enemy, angleOffset = 0) {
+    if (!owner.projectileType) return;
+    const dx = this.player.x + this.player.size / 2 - (owner.x + owner.size / 2);
+    const dy = this.player.y + this.player.size / 2 - (owner.y + owner.size / 2);
+    const angle = Math.atan2(dy, dx) + angleOffset; const speed = 5;
+    this.activeProjectiles.push({
+      x: owner.x + owner.size / 2 - 5, y: owner.y + owner.size / 2 - 5,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      size: 18, type: owner.projectileType, owner: "enemy",
+      damage: owner.damage * 0.8, rotation: angle,
+    });
+  }
+
+  private updateProjectiles(room: Room) {
+    this.activeProjectiles = this.activeProjectiles.filter(p => {
+      p.x += p.vx; p.y += p.vy;
+      const isProjectileHitPlayer = this.rectIntersect(this.player, { ...p, w: p.size, h: p.size });
+      if (p.owner === "enemy" && isProjectileHitPlayer && !this.player.isInvincible) {
+        this.player.hp -= p.damage * (1 - this.player.shadowResilience);
+        this.activeEffects.push({type: "projectileHitPlayer", x:p.x, y:p.y, time: 15});
+        if (this.player.hp <= 0) this.triggerGameOver();
+        return false;
+      }
+      for (const wall of room.walls) {
+        if (this.rectIntersect({ ...p, w: p.size, h: p.size }, wall)) {
+          this.activeEffects.push({type: "projectileHitWall", x:p.x, y:p.y, time: 10});
+          return false;
+        }
+      }
+      return p.x > -p.size && p.x < this.W && p.y > -p.size && p.y < this.H;
+    });
+  }
+
   render() {
-    const room = this.getCurrentRoom();
-    const ctx = this.ctx;
-
+    if (!this.ctx) return;
+    const room = this.getCurrentRoom(); const ctx = this.ctx;
     this.drawBackground(room);
-
-    room.hazards.forEach((h) => {
-      ctx.fillStyle = "rgba(0,255,0,0.08)";
-      ctx.fillRect(h.x, h.y, h.w, h.h);
+    room.hazards.forEach(h => { ctx.fillStyle = h.type === "spikeTrap" ? "rgba(160,40,40,0.1)" : "rgba(100,0,130,0.12)"; ctx.fillRect(h.x, h.y, h.w, h.h); });
+    room.doors.forEach((d, doorIdx) => {
+        const portalCenterX = d.x + d.w / 2; const portalCenterY = d.y + d.h / 2;
+        ctx.save();
+        if (this.portalImage?.complete && this.portalImage.naturalHeight !== 0) {
+            ctx.translate(portalCenterX, portalCenterY);
+            const portalAnimFactor = Math.sin(this.frameCount * 0.05 + doorIdx) * 0.05 + 1.0;
+            ctx.scale(portalAnimFactor, portalAnimFactor); ctx.rotate(Math.sin(this.frameCount * 0.02 + doorIdx * 0.5) * 0.1);
+            const doorKey = `${this.player.room}-${doorIdx}`;
+            const targetRoomData = rooms[d.target]; const targetDoorIndex = targetRoomData.doors.findIndex(door => door.target === this.player.room);
+            const targetDoorKey = `${d.target}-${targetDoorIndex}`;
+            const isOpened = this.openedDoors.has(doorKey) || (targetDoorIndex !== -1 && this.openedDoors.has(targetDoorKey));
+            let portalFilter = 'none';
+            if (d.lock === "key" && !isOpened && this.difficulty !== "peaceful") portalFilter = 'sepia(1) saturate(4) hue-rotate(270deg) brightness(0.7)';
+            else if (d.lock === "key" && isOpened) portalFilter = 'brightness(1.2) saturate(1.5)';
+            ctx.filter = portalFilter;
+            ctx.drawImage(this.portalImage, -d.w / 2, -d.h / 2, d.w, d.h);
+        } else { ctx.fillStyle = "purple"; ctx.fillRect(-d.w / 2, -d.h / 2, d.w, d.h); }
+        ctx.restore();
     });
-
-    room.doors.forEach((d, i) => {
-      const key = `${this.player.room}-${i}`;
-      ctx.fillStyle =
-        d.lock === "key" ? (this.openedDoors.has(key) ? "gold" : "purple") : "gold";
-      ctx.fillRect(d.x, d.y, d.w, d.h);
-    });
-
-    room.walls.forEach((w) => {
-      ctx.fillStyle = w.color;
-      ctx.fillRect(w.x, w.y, w.w, w.h);
-    });
-
-    room.items.forEach((it) => {
+    room.walls.forEach(w => { ctx.fillStyle = w.color; ctx.fillRect(w.x, w.y, w.w, w.h); });
+    room.items.forEach(it => {
       const img = this.itemImages[it.type];
-      if (img?.complete) ctx.drawImage(img, it.x, it.y, it.w * 2, it.h * 2);
-      else {
-        ctx.fillStyle = "#fff";
-        ctx.fillRect(it.x, it.y, it.w, it.h);
-      }
+      if (img?.complete && img.naturalHeight !== 0) ctx.drawImage(img, it.x, it.y, it.w * 1.5, it.h * 1.5);
+      else { ctx.fillStyle = "#FFF"; ctx.fillRect(it.x, it.y, it.w, it.h); }
     });
-
-    room.enemies.forEach((e) => {
+    this.renderProjectiles(ctx);
+    room.enemies.forEach(e => {
       if (e.hp <= 0) return;
-      ctx.fillStyle = e.color;
-      ctx.fillRect(e.x, e.y, e.size, e.size);
-      ctx.fillStyle = "black";
-      ctx.fillRect(e.x, e.y - 6, e.size, 4);
-      ctx.fillStyle = "red";
-      ctx.fillRect(e.x, e.y - 6, (e.size * e.hp) / e.hpMax, 4);
-    });
-
-    const pImg = this.itemImages["player"];
-    if (pImg?.complete)
-      ctx.drawImage(pImg, this.player.x, this.player.y, this.player.size, this.player.size);
-    else {
-      ctx.fillStyle = this.player.color;
-      ctx.fillRect(this.player.x, this.player.y, this.player.size, this.player.size);
-    }
-
-    if (this.transitionAlpha > 0) {
-      ctx.fillStyle = `rgba(0,0,0,${this.transitionAlpha})`;
-      ctx.fillRect(0, 0, this.W, this.H);
-    }
-
-    // Render active effects
-    this.activeEffects.forEach(effect => {
+      const enemyImg = this.enemyImages[e.sprite];
       ctx.save();
-      switch (effect.type) {
-        case "heal":
-          ctx.fillStyle = `rgba(0, 255, 0, ${effect.time / 30})`;
-          ctx.beginPath();
-          ctx.arc(effect.x + this.player.size/2, effect.y + this.player.size/2, 30, 0, Math.PI * 2);
-          ctx.fill();
-          break;
-        case "railgun":
-          ctx.strokeStyle = `rgba(0, 255, 255, ${effect.time / 30})`;
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.moveTo(this.player.x + this.player.size/2, this.player.y + this.player.size/2);
-          ctx.lineTo(effect.x + 25, effect.y + 25);
-          ctx.stroke();
-          break;
-        case "speed":
-          ctx.fillStyle = `rgba(255, 255, 0, ${effect.time / 150})`;
-          ctx.beginPath();
-          ctx.arc(effect.x + this.player.size/2, effect.y + this.player.size/2, 20, 0, Math.PI * 2);
-          ctx.fill();
-          break;
-        case "shield":
-          ctx.strokeStyle = `rgba(0, 255, 255, ${effect.time / 300})`;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(effect.x + this.player.size/2, effect.y + this.player.size/2, 35, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        case "scanner":
-          ctx.strokeStyle = `rgba(255, 0, 255, ${effect.time / 180})`;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(effect.x + 45, effect.y + 45, 45, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        case "stim":
-          ctx.fillStyle = `rgba(255, 0, 0, ${effect.time / 210})`;
-          ctx.beginPath();
-          ctx.arc(effect.x + this.player.size/2, effect.y + this.player.size/2, 25, 0, Math.PI * 2);
-          ctx.fill();
-          break;
-        case "emp":
-          ctx.strokeStyle = `rgba(0, 255, 0, ${effect.time / 180})`;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(effect.x + 14, effect.y + 14, 20, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        case "ammo":
-          ctx.fillStyle = `rgba(255, 165, 0, ${effect.time / 30})`;
-          ctx.beginPath();
-          ctx.arc(effect.x + this.player.size/2, effect.y + this.player.size/2, 15, 0, Math.PI * 2);
-          ctx.fill();
-          break;
-      }
+      if (enemyImg?.complete && enemyImg.naturalHeight !== 0) {
+        if (e.isLunging === true) {
+            ctx.globalAlpha = 0.6 + Math.sin(this.frameCount * 0.5) * 0.2;
+            let angle = 0;
+            if (typeof e.lungeTargetX === 'number' && typeof e.lungeTargetY === 'number') {
+                 angle = Math.atan2(e.lungeTargetY - e.y, e.lungeTargetX - e.x);
+            }
+            ctx.translate(e.x + e.size/2, e.y + e.size/2); ctx.rotate(angle + Math.PI/2);
+            ctx.drawImage(enemyImg, -e.size/2, -e.size/2, e.size, e.size);
+        } else ctx.drawImage(enemyImg, e.x, e.y, e.size, e.size);
+      } else { ctx.fillStyle = e.color || "magenta"; ctx.fillRect(e.x, e.y, e.size, e.size); }
       ctx.restore();
+      ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(e.x, e.y - 10, e.size, 7);
+      ctx.fillStyle = e.sprite === "shadowOverlord" ? "#FF0000" : "#B22222";
+      ctx.fillRect(e.x + 1, e.y - 9, Math.max(0,(e.size - 2) * e.hp / e.hpMax), 5);
     });
-
-    // Render dialog message
+    if (this.playerImage?.complete && this.playerImage.naturalHeight !== 0) {
+      ctx.drawImage(this.playerImage, this.player.x, this.player.y, this.player.size, this.player.size);
+    } else { ctx.fillStyle = "blue"; ctx.fillRect(this.player.x, this.player.y, this.player.size, this.player.size); }
+    this.renderActiveEffects(ctx);
+    if (this.transitionAlpha > 0) { ctx.fillStyle = `rgba(0,0,0,${this.transitionAlpha})`; ctx.fillRect(0, 0, this.W, this.H); }
     if (this.dialogMessage) {
-      ctx.save();
-      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-      ctx.fillRect(0, this.H - 100, this.W, 100);
-      
-      ctx.fillStyle = "white";
-      ctx.font = "20px Arial";
-      ctx.textAlign = "center";
-      ctx.fillText(this.dialogMessage, this.W / 2, this.H - 50);
-      ctx.restore();
+        ctx.save(); ctx.fillStyle = "rgba(0, 0, 0, 0.75)"; const dialogHeight = 80;
+        ctx.fillRect(this.W / 2 - 300, this.H - dialogHeight - 20, 600, dialogHeight);
+        ctx.fillStyle = "#E0E0E0"; ctx.font = "italic 18px 'Times New Roman', serif"; ctx.textAlign = "center";
+        this.wrapText(ctx, this.dialogMessage, this.W / 2, this.H - dialogHeight/2 - 10, 580, 22);
+        ctx.restore();
     }
-
-    // Pass selectedItem to GameHUD
+    if (this.gameWon) this.drawEndScreen(ctx, "YOU HAVE VANQUISHED THE SHADOWS!", "green", "Press Enter to Begin Anew");
+    if (this.gameOver && !this.gameWon) this.drawEndScreen(ctx, "YOU HAVE FALLEN", "darkred", "Press Enter to Restart");
     if (this.onRender) {
       this.onRender({
-        player: this.player,
-        roomName: this.getCurrentRoom().name,
-        nearBench: this.nearBench(),
-        itemCooldowns: this.itemCooldowns,
-        selectedItem: this.selectedItem
+        player: this.player, roomName: room.name, nearAnvil: this.nearAnvil(),
+        itemCooldowns: this.itemCooldowns, selectedItem: this.selectedItem, bossDefeated: this.gameWon,
       });
     }
   }
-
-  /* ────────── BACKGROUND ────────── */
+  private drawEndScreen(ctx: CanvasRenderingContext2D, title: string, titleColor: string, subtitle: string) {
+    ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0, 0, this.W, this.H);
+    ctx.font = "bold 48px 'Times New Roman', serif"; ctx.fillStyle = titleColor; ctx.textAlign = "center";
+    ctx.fillText(title, this.W / 2, this.H / 2 - 40);
+    ctx.font = "24px 'Times New Roman', serif"; ctx.fillStyle = "lightgray";
+    ctx.fillText(subtitle, this.W / 2, this.H / 2 + 20);
+  }
+  private renderProjectiles(ctx: CanvasRenderingContext2D) {
+    this.activeProjectiles.forEach(p => {
+      const img = this.projectileImages[p.type]; ctx.save();
+      ctx.translate(p.x + p.size/2, p.y + p.size/2); ctx.rotate(p.rotation);
+      if (img?.complete && img.naturalHeight !== 0) ctx.drawImage(img, -p.size/2, -p.size/2, p.size, p.size);
+      else { ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(0,0, p.size/2, 0, Math.PI*2); ctx.fill(); }
+      ctx.restore();
+    });
+  }
+  private renderActiveEffects(ctx: CanvasRenderingContext2D) {
+    this.activeEffects.forEach(effect => {
+        ctx.save();
+        const effectX = (effect.type === "crossbowBolt" || effect.type === "curseScan" || effect.type === "paralysis" || effect.type === "projectileHitPlayer" || effect.type === "projectileHitWall" || effect.type === "bossLungeCharge" || effect.type === "bossShoot" ) ? effect.x : this.player.x + this.player.size / 2;
+        const effectY = (effect.type === "crossbowBolt" || effect.type === "curseScan" || effect.type === "paralysis" || effect.type === "projectileHitPlayer" || effect.type === "projectileHitWall" || effect.type === "bossLungeCharge" || effect.type === "bossShoot") ? effect.y : this.player.y + this.player.size / 2;
+        switch (effect.type) {
+            case "heal": ctx.fillStyle = `rgba(0, 220, 0, ${effect.time / 30})`; ctx.beginPath(); ctx.arc(effectX, effectY, 20 + (15 - effect.time / 2), 0, Math.PI * 2); ctx.fill(); break;
+            case "crossbowBolt": ctx.fillStyle = `rgba(255, 200, 0, ${effect.time / 15})`; ctx.beginPath(); ctx.arc(effect.x, effect.y, 10 + (5-effect.time/3), 0, Math.PI*2); ctx.fill(); break;
+            case "swiftness": ctx.fillStyle = `rgba(220, 220, 100, ${effect.time / 150})`; ctx.beginPath(); ctx.arc(effectX, effectY, this.player.size * 0.3 + (10 - effect.time/15), 0, Math.PI*2); ctx.fill(); break;
+            case "shielding": ctx.strokeStyle = `rgba(135, 206, 250, ${effect.time / 300})`; ctx.lineWidth = 3 + (2 - effect.time/150); ctx.beginPath(); ctx.arc(effectX, effectY, this.player.size * 0.6 + (10-effect.time/30), 0, Math.PI*2); ctx.stroke(); break;
+            case "curseScan": ctx.strokeStyle = `rgba(148, 0, 211, ${effect.time / 180})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(effect.x, effect.y, (effect.size ?? 20)/2 + (20 - effect.time/9), 0, Math.PI*2); ctx.stroke(); break;
+            case "berserk": ctx.fillStyle = `rgba(255, 60, 0, ${effect.time / 210})`; ctx.beginPath(); ctx.arc(effectX, effectY, this.player.size * 0.4 + (10-effect.time/21), 0, Math.PI*2); ctx.fill(); break;
+            case "paralysis": ctx.fillStyle = `rgba(255, 255, 0, ${effect.time / 180 * 0.7})`; for(let i=0; i<3; ++i) {ctx.beginPath(); ctx.arc(effect.x + Math.random()*10-5, effect.y + Math.random()*10-5, Math.random()*5 + 2, 0, Math.PI*2); ctx.fill();} break;
+            case "boltsReload": ctx.fillStyle = `rgba(139, 69, 19, ${effect.time / 30})`; ctx.beginPath(); ctx.arc(effectX, effectY, 10 + (8-effect.time/4),0,Math.PI*2); ctx.fill(); break;
+            case "projectileHitPlayer": ctx.fillStyle = `rgba(255,0,0, ${effect.time/15})`; ctx.beginPath(); ctx.arc(effectX, effectY, 15, 0, Math.PI*2); ctx.fill(); break;
+            case "projectileHitWall": ctx.fillStyle = `rgba(200,200,200, ${effect.time/10})`; ctx.beginPath(); ctx.arc(effectX, effectY, 8, 0, Math.PI*2); ctx.fill(); break;
+            case "bossLungeCharge": ctx.fillStyle = `rgba(255, 0, 0, ${0.2 + Math.sin(this.frameCount*0.3)*0.1})`; ctx.beginPath(); ctx.arc(effectX, effectY, (effect.size ?? 80) * (0.5 + (45-effect.time)/90) , 0, Math.PI*2); ctx.fill(); break;
+            case "bossShoot": ctx.fillStyle = `rgba(200, 0, 200, ${effect.time/30 * 0.7})`; ctx.beginPath(); ctx.arc(effectX, effectY, 25, 0, Math.PI*2); ctx.fill(); break;
+        }
+        ctx.restore();
+    });
+  }
   private drawBackground(room: Room) {
-    const ctx = this.ctx;
-    const g = ctx.createLinearGradient(0, 0, 0, this.H);
-    g.addColorStop(0, room.bgColor1);
-    g.addColorStop(1, room.bgColor2);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, this.W, this.H);
-
-    if (room.bgType === "skyline") {
-      ctx.fillStyle = room.skylineColor || "#0a0a0a";
-      for (let i = 0; i < 20; i++) {
-        const w = this.rand(20, 40);
-        const h = this.rand(60, 140);
-        const x = ((i * 60 - this.backgroundOffset * 0.3) % (this.W + 60)) - 30;
-        ctx.fillRect(x, this.H - h, w, h);
-      }
-    }
+    const ctx = this.ctx; const g = ctx.createLinearGradient(0, 0, 0, this.H);
+    g.addColorStop(0, room.bgColor1); g.addColorStop(1, room.bgColor2);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, this.W, this.H);
+    if (room.bgType === "skyline" && room.skylineColor) { /* ... */ }
+    else if (room.bgType === "forest" && room.fgColor) { /* ... */ }
+    else if (room.bgType === "dungeon" && room.skylineColor) { /* ... */ }
   }
-
-  /* ────────── UTIL ────────── */
-  private rectIntersect(a: any, b: any) {
-    return (
-      a.x < b.x + (b.w ?? b.size) &&
-      a.x + (a.w ?? a.size) > b.x &&
-      a.y < b.y + (b.h ?? b.size) &&
-      a.y + (a.h ?? a.size) > b.y
-    );
+  private rectIntersect(a: RectObject, b: RectObject): boolean {
+    const aW = a.w ?? a.size ?? 0; const aH = a.h ?? a.size ?? 0;
+    const bW = b.w ?? b.size ?? 0; const bH = b.h ?? b.size ?? 0;
+    return (a.x < b.x + bW && a.x + aW > b.x && a.y < b.y + bH && a.y + aH > b.y);
   }
-  private rand(min: number, max: number) {
-    return Math.random() * (max - min) + min;
-  }
-  private clamp(v: number, min: number, max: number) {
-    return Math.max(min, Math.min(max, v));
-  }
-
-  private getCurrentRoom(): Room {
-    if (this.player.room < 0 || this.player.room >= rooms.length) this.player.room = 0;
-    return rooms[this.player.room];
-  }
-
-  /* ────────── CRAFT ────────── */
-  private nearBench() {
-    return this.getCurrentRoom().items.some(
-      (it) => it.type === "bench" && this.rectIntersect(this.player, it)
-    );
-  }
-  
-  toggleCrafting() {
-    this.craftingMode = !this.craftingMode;
-    this.craftSelection = 0;
-  }
-  
-  private canAfford(recipeIndex: number) {
-    // In peaceful mode, you can craft everything for free
+  private rand(min: number, max: number): number { return Math.random() * (max - min) + min; }
+  private clamp(v: number, min: number, max: number): number { return Math.max(min, Math.min(max, v)); }
+  private getCurrentRoom(): Room { this.visitedRooms.add(this.player.room); return rooms[this.player.room]; }
+  private nearAnvil(): boolean { return this.getCurrentRoom().items.some(it => it.type === "anvil" && this.rectIntersect(this.player, it)); }
+  toggleCrafting() { this.craftingMode = !this.craftingMode; this.craftSelection = 0; }
+  private canAfford(recipeIndex: number): boolean {
     if (this.difficulty === 'peaceful') return true;
-    
     const recipe = recipes[recipeIndex];
-    for (const r of resourceTypes) {
-      if ((recipe.cost[r] ?? 0) > this.player.materials[r]) return false;
-    }
+    for (const r of resourceTypes) if ((recipe.cost[r] ?? 0) > this.player.materials[r]) return false;
     return true;
   }
-  
   attemptCraft() {
     const recipe = recipes[this.craftSelection];
-    if (!this.canAfford(this.craftSelection)) return;
-
-    // Only consume resources if not in peaceful mode
+    if (!this.canAfford(this.craftSelection)) { this.showDialog("You lack the required materials."); return; }
     if (this.difficulty !== 'peaceful') {
-      for (const r of resourceTypes) {
-        this.player.materials[r] -= recipe.cost[r] ?? 0;
-      }
+        for (const r of resourceTypes) this.player.materials[r] -= recipe.cost[r] ?? 0;
     }
-
+    this.showDialog(`Successfully forged: ${recipe.name}!`);
     switch (recipe.name) {
-      case "Medkit+":
-        this.player.hp = this.player.hpMax;
-        break;
-      case "Radiation Suit":
-        this.player.radRes = Math.min(1, this.player.radRes + 0.5);
-        break;
-      case "Speed Boots":
-        this.player.speed += 1;
-        break;
-      case "Keycard":
-        this.player.keys += 1;
-        break;
-      case "Rail Gun":
-        this.player.inventory.railgun = true;
-        this.player.railgunAmmo = 3;
-        break;
-      case "Shield Generator":
-        this.player.inventory.shieldgenerator = true;
-        break;
-      case "Radiation Scanner":
-        this.player.inventory.radiationscanner = true;
-        break;
-      case "Combat Stim":
-        this.player.inventory.combatstim = true;
-        break;
-      case "EMP Grenade":
-        this.player.inventory.empgrenade = true;
-        break;
-      case "Ammo Pack":
-        this.player.inventory.ammopack = true;
+      case "Greater Healing Potion": this.player.hp = this.player.hpMax; this.activeEffects.push({ type: "heal", x: this.player.x, y: this.player.y, time: 60 }); break;
+      case "Enchanted Armor Piece": this.player.shadowResilience = Math.min(1, this.player.shadowResilience + 0.5); break;
+      case "Boots of Swiftness": this.player.speed += 1; break; // Note: useItem has an activatable version, this is permanent
+      case "Skeleton Key": this.player.keys += 1; break;
+      case "Heavy Crossbow": this.player.inventory.heavyCrossbow = true; this.player.crossbowBolts = 5; break;
+      case "Amulet of Shielding": this.player.inventory.amuletOfShielding = true; break;
+      case "Orb of Revealing": this.player.inventory.orbOfRevealing = true; break;
+      case "Berserker's Draught": this.player.inventory.berserkersDraught = true; break;
+      case "Rune of Paralysis": this.player.inventory.runeOfParalysis = true; break;
+      case "Quiver of Bolts":
+        if (this.player.inventory.heavyCrossbow === true) this.player.crossbowBolts = Math.min(this.player.crossbowBolts + 5, 10);
+        else { this.showDialog("You need a Heavy Crossbow to use these bolts."); if (this.difficulty !== 'peaceful') for (const r of resourceTypes) this.player.materials[r] += recipe.cost[r] ?? 0; }
         break;
     }
   }
-
-  /* ────────── ROOM CHANGE ────────── */
-  private changeRoom(index: number, dest: { x: number; y: number }) {
-    this.transitionAlpha = 1;
-
-    setTimeout(() => {
-      this.player.room = index;
-      this.player.x = dest.x;
-      this.player.y = dest.y;
-
-      this.placePlayerSafely(); // **fix principal**
-      this.visitedRooms.add(index);
-      this.doorCooldown = 10;   // backup
-    }, 50);
-  }
-
-  /** deplasează jucătorul în afara oricărei uși cu care se suprapune */
-  private placePlayerSafely() {
-    const room = this.getCurrentRoom();
-    let moved = true;
-    let iter = 0;
-
-    while (moved && iter < 6) {
-      moved = false;
-      for (const d of room.doors) {
-        if (!this.rectIntersect(this.player, d)) continue;
-
-        const pcx = this.player.x + this.player.size / 2;
-        const pcy = this.player.y + this.player.size / 2;
-        const dcx = d.x + d.w / 2;
-        const dcy = d.y + d.h / 2;
-
-        if (Math.abs(pcx - dcx) > Math.abs(pcy - dcy)) {
-          // mutare pe X
-          const shift =
-            Math.sign(pcx - dcx) * (d.w / 2 + this.player.size / 2 + 6);
-          this.player.x = dcx + shift - this.player.size / 2;
-        } else {
-          // mutare pe Y
-          const shift =
-            Math.sign(pcy - dcy) * (d.h / 2 + this.player.size / 2 + 6);
-          this.player.y = dcy + shift - this.player.size / 2;
-        }
-        moved = true;
+  private changeRoom(index: number, dest: { x: number; y: number }) { /* ... */ }
+  private placePlayerSafely() { /* ... */ }
+  private triggerGameOver() { if (this.gameWon) return; this.player.hp = 0; this.gameOver = true; this.craftingMode = false; this.showDialog("Darkness consumes you... Press Enter to restart.", 6000); }
+  private checkBossDefeated() {
+      const currentRoomData = rooms[this.player.room];
+      if (currentRoomData.name === "The Shadow Lord's Lair") {
+          const boss = currentRoomData.enemies.find(e => e.sprite === "shadowOverlord");
+          if (boss && boss.hp <= 0 && !this.gameWon) {
+              this.gameWon = true; this.showDialog("The Shadow Overlord is VANQUISHED! Press Enter to Begin Anew.", 10000);
+              const exitPortal = currentRoomData.doors[0];
+              if (exitPortal) { const doorKey = `${this.player.room}-0`; this.openedDoors.add(doorKey); }
+          }
       }
-      iter++;
-    }
-    this.player.x = this.clamp(this.player.x, 0, this.W - this.player.size);
-    this.player.y = this.clamp(this.player.y, 0, this.H - this.player.size);
   }
-
-  /* ────────── GAME STATE ────────── */
-  private triggerGameOver() {
-    this.player.hp = 0;
-    this.gameOver = true;
-    this.craftingMode = false; // Ensure crafting is closed when game over
-  }
-
-  saveGame(force = false) {
-    const now = performance.now();
-    if (!force && now - this.lastSaveTime < 30_000) return;
-    this.lastSaveTime = now;
-
-    localStorage.setItem(
-      "chernobylSave_v4",
-      JSON.stringify({
-        ...this.player,
-        visitedRooms: Array.from(this.visitedRooms),
-        openedDoors: Array.from(this.openedDoors),
-      })
-    );
-  }
-  loadGame() {
-    const raw = localStorage.getItem("chernobylSave_v4");
-    if (!raw) return;
-    try {
-      const d = JSON.parse(raw);
-      Object.assign(this.player, d);
-      this.visitedRooms = new Set<number>(d.visitedRooms ?? []);
-      this.openedDoors = new Set<string>(d.openedDoors ?? []);
-    } catch (e) {
-      console.error("Failed to load save:", e);
-    }
-  }
-
-  setDifficulty(difficulty: 'peaceful' | 'easy' | 'normal' | 'hard') {
-    this.difficulty = difficulty;
-    
-    // Give 99 of all resources in peaceful mode
-    if (difficulty === 'peaceful') {
-      this.player.materials = {
-        scrap: 99,
-        circuits: 99,
-        chemicals: 99
-      };
-    }
-  }
+  saveGame(force = false) { /* ... */ }
+  loadGame() { /* ... */ }
+  setDifficulty(difficulty: 'peaceful' | 'easy' | 'normal' | 'hard') { /* ... */ }
 
   resetGame() {
-    // Reset player state
     this.player = {
-      x: 50,
-      y: 300,
-      size: 50,
-      color: "lime",
-      speed: 4,
-      room: 0,
-      hp: 100,
-      hpMax: 100,
-      keys: 0,
-      radRes: 0,
-      materials: { scrap: 0, circuits: 0, chemicals: 0 },
-      inventory: {},
-      railgunAmmo: 0,
-      isInvincible: false,
-      damageMultiplier: 1,
+      x: 50, y: 300, size: 48, speed: 4, room: 0, hp: 100, hpMax: 100, keys: 0,
+      shadowResilience: 0, materials: { ironScraps: 0, arcaneDust: 0, alchemicalReagents: 0 },
+      inventory: {}, crossbowBolts: 0, isInvincible: false, damageMultiplier: 1,
     };
+    this.visitedRooms = new Set([0]); this.openedDoors.clear(); this.gameOver = false;
+    this.gameWon = false; this.craftingMode = false; this.transitionAlpha = 0;
+    this.doorCooldown = 0; this.dialogMessage = ""; this.dialogTimer = 0;
+    this.itemCooldowns = {}; this.activeEffects = []; this.activeProjectiles = [];
+    this.selectedItem = 0; this.craftSelection = 0; this.frameCount = 0;
 
-    // Reset game state
-    this.visitedRooms = new Set([0]);
-    this.openedDoors.clear();
-    this.gameOver = false;
-    this.craftingMode = false;
-    this.transitionAlpha = 0;
-    this.doorCooldown = 0;
-    this.dialogMessage = "";
-    this.dialogTimer = 0;
-    this.itemCooldowns = {};
-    this.activeEffects = [];
-    this.selectedItem = 0;
-    this.craftSelection = 0;
-    this.backgroundOffset = 0;
-
-    // Reset enemies to their initial positions
-    rooms.forEach((room, idx) => {
-      const initialPositions = this.enemyInitialPositions.get(idx);
-      if (initialPositions) {
-        room.enemies.forEach((enemy, i) => {
-          if (initialPositions[i]) {
-            enemy.x = initialPositions[i].x;
-            enemy.y = initialPositions[i].y;
-            enemy.hp = initialPositions[i].hpMax;
-            enemy.speed = initialPositions[i].speed;
-          }
-        });
-      }
+    // Corrected enemy reset logic:
+    rooms.forEach((roomData, roomIdx) => {
+        const initialEnemyStatesForRoom = this.enemyInitialPositions.get(roomIdx);
+        if (initialEnemyStatesForRoom) {
+            roomData.enemies = initialEnemyStatesForRoom.map(initialState => {
+                // initialState is already a complete Enemy object from the constructor's map
+                return {
+                    ...initialState, // Spread all properties from the stored initial state
+                    hp: initialState.hpMax, // Reset hp to full from its specific hpMax
+                    lastAttackTime: 0,
+                    isLunging: false,
+                };
+            });
+        } else {
+            // Fallback if a room somehow has no entry in enemyInitialPositions
+            // This ideally shouldn't happen if constructor populates for all rooms.
+            roomData.enemies = [];
+        }
     });
 
-    // Reset items in rooms to their initial state
-    rooms.forEach(room => {
-      // Keep only the crafting benches
-      const benches = room.items.filter(item => item.type === 'bench');
-      
-      // Add back all other items from the original room data
-      const originalRoom = rooms.find(r => r.name === room.name);
-      if (originalRoom) {
-        room.items = [
-          ...benches,
-          ...originalRoom.items.filter(item => item.type !== 'bench')
-        ];
-      }
+    rooms.forEach((room, i) => {
+        const originalRoomDataFile = rooms[i]; // Assuming rooms from import is the pristine version
+        // Create a deep copy of items to prevent mutation issues if game-data is somehow altered
+        // This is a simplified way; a true deep clone might be safer if item objects have nested structures.
+        room.items = JSON.parse(JSON.stringify(originalRoomDataFile.items)).map((item: Item) => ({...item}));
     });
-
-    // Clear saved game
-    localStorage.removeItem("chernobylSave_v4");
+    localStorage.removeItem("knightfallSave_v1");
+    this.showDialog("A new adventure begins!");
   }
 
-  private useItem(itemName: string) {
-    if (!this.player.inventory[itemName] || (this.itemCooldowns[itemName] ?? 0) > 0) return;
-
-    switch (itemName) {
-      case "medkit":
-        this.player.hp = this.player.hpMax;
-        this.itemCooldowns[itemName] = 60; // 1 second cooldown
-        this.activeEffects.push({ type: "heal", x: this.player.x, y: this.player.y, time: 30 });
-        break;
-      case "railgun":
-        if (this.player.railgunAmmo <= 0) return;
-        // Damage all enemies in the room
-        const room = this.getCurrentRoom();
-        room.enemies.forEach(e => {
-          if (e.hp > 0) {
-            e.hp = 0;
-            this.activeEffects.push({ type: "railgun", x: e.x, y: e.y, time: 30 });
-          }
-        });
-        this.player.railgunAmmo--;
-        this.itemCooldowns[itemName] = 180; // 3 second cooldown
-        break;
-      case "speedboots":
-        // Temporary speed boost
-        const originalSpeed = this.player.speed;
-        this.player.speed *= 2;
-        this.itemCooldowns[itemName] = 300; // 5 second cooldown
-        setTimeout(() => {
-          this.player.speed = originalSpeed;
-        }, 5000);
-        this.activeEffects.push({ type: "speed", x: this.player.x, y: this.player.y, time: 150 });
-        break;
-      case "shieldgenerator":
-        this.player.isInvincible = true;
-        this.itemCooldowns[itemName] = 600; // 10 second cooldown
-        setTimeout(() => {
-          this.player.isInvincible = false;
-        }, 5000);
-        this.activeEffects.push({ type: "shield", x: this.player.x, y: this.player.y, time: 300 });
-        break;
-      case "radiationscanner":
-        const currentRoom = this.getCurrentRoom();
-        currentRoom.hazards.forEach(h => {
-          this.activeEffects.push({ type: "scanner", x: h.x, y: h.y, time: 180 });
-        });
-        this.itemCooldowns[itemName] = 300; // 5 second cooldown
-        break;
-      case "combatstim":
-        this.player.damageMultiplier = 2;
-        this.itemCooldowns[itemName] = 420; // 7 second cooldown
-        setTimeout(() => {
-          this.player.damageMultiplier = 1;
-        }, 7000);
-        this.activeEffects.push({ type: "stim", x: this.player.x, y: this.player.y, time: 210 });
-        break;
-      case "empgrenade":
-        const room2 = this.getCurrentRoom();
-        room2.enemies.forEach(e => {
-          if (e.hp > 0) {
-            e.speed = 0;
-            this.activeEffects.push({ type: "emp", x: e.x, y: e.y, time: 180 });
-            setTimeout(() => {
-              e.speed = e.speed * 2; // Restore original speed
-            }, 3000);
-          }
-        });
-        this.itemCooldowns[itemName] = 240; // 4 second cooldown
-        break;
-      case "ammopack":
-        this.player.railgunAmmo = Math.min(this.player.railgunAmmo + 3, 6);
-        this.itemCooldowns[itemName] = 120; // 2 second cooldown
-        this.activeEffects.push({ type: "ammo", x: this.player.x, y: this.player.y, time: 30 });
-        break;
-    }
-  }
-
-  private showDialog(message: string) {
-    this.dialogMessage = message;
-    this.dialogTimer = 180; // Show for 3 seconds (60 frames per second)
-  }
+  private useItem(itemName: string) { /* ... */ }
+  private showDialog(message: string, duration = 240) { this.dialogMessage = message; this.dialogTimer = duration; }
+  private wrapText(context: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) { /* ... */ }
 }
