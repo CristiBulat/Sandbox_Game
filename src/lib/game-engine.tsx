@@ -1,5 +1,5 @@
 import {
-  rooms,
+  rooms as gameDataRooms, // Rename to avoid conflict with class member if any, and to signify pristine data
   recipes,
   resourceTypes,
   type Room,
@@ -25,9 +25,9 @@ type Projectile = {
 type RectObject = {
   x: number;
   y: number;
-  w?: number;
-  h?: number;
-  size?: number;
+  w?: number; // Optional width
+  h?: number; // Optional height
+  size?: number; // Optional size (for square objects)
 };
 
 
@@ -51,10 +51,13 @@ export class GameEngine {
     bossDefeated?: boolean;
   }) => void;
 
+  // Live rooms data, will be modified (e.g. enemy HP, collected items)
+  private liveRoomsData: Room[];
+
   visitedRooms = new Set<number>();
   difficulty: "peaceful" | "easy" | "normal" | "hard" = "normal";
-  // enemyInitialPositions stores a snapshot of Enemy objects as they were at game start
-  enemyInitialPositions = new Map<number, Enemy[]>(); // Changed from Partial<Enemy>[] to Enemy[]
+  // enemyInitialPositions stores a snapshot of COMPLETE Enemy objects as they were at game start
+  enemyInitialPositions = new Map<number, Enemy[]>();
   openedDoors = new Set<string>();
 
   doorCooldown = 0;
@@ -95,21 +98,28 @@ export class GameEngine {
     this.W = canvas.width;
     this.H = canvas.height;
 
-    // Populate enemyInitialPositions with full Enemy objects, initialized for game start
-    rooms.forEach((room, idx) => {
+    // Use a deep copy for liveRoomsData if you modify it extensively
+    this.liveRoomsData = JSON.parse(JSON.stringify(gameDataRooms));
+
+    this.liveRoomsData.forEach((room, idx) => {
       this.enemyInitialPositions.set(
         idx,
-        room.enemies.map(e => ({ // e is type Enemy from game-data
-            ...e, // Spread all properties from the original Enemy definition
-            lastAttackTime: 0, // Initialize dynamic state
-            isLunging: false   // Initialize dynamic state
+        // Ensure the objects created here are full Enemy objects
+        room.enemies.map((e: Enemy): Enemy => ({
+            ...e, // Spreads all properties from the original Enemy (x, y, hpMax, sprite, etc.)
+            lastAttackTime: 0, // Initialize/overwrite dynamic state
+            isLunging: false,  // Initialize/overwrite dynamic state
+            // hp is already e.hp (which should be e.hpMax from game-data's definition)
         }))
       );
     });
 
+    this.resetEnemies(); // Initialize live enemies based on these positions
+    this.resetItems();   // Initialize live items
+
     if (typeof window !== "undefined") this.loadImages();
   }
-
+  
   private loadImages() {
     const assetTypes = ["healthPotion", "ornateKey", "ironScraps", "arcaneDust", "alchemicalReagents", "anvil"];
     assetTypes.forEach(name => {
@@ -136,9 +146,9 @@ export class GameEngine {
 
   handleKeyDown(e: KeyboardEvent) {
     this.keysState[e.key.toLowerCase()] = true;
-    if (this.keysState["c"] === true && this.nearAnvil()) this.toggleCrafting(); // Explicit true check
+    if (this.keysState["c"] === true && this.nearAnvil()) this.toggleCrafting();
     if (e.key >= "1" && e.key <= "9") this.selectedItem = parseInt(e.key) - 1;
-    if (this.keysState["e"] === true) { // Explicit true check
+    if (this.keysState["e"] === true) {
       const inventoryItems = Object.entries(this.player.inventory)
         .filter(([_, hasItem]) => hasItem === true).map(([item]) => item);
       const selectedItemName = inventoryItems[this.selectedItem];
@@ -151,6 +161,7 @@ export class GameEngine {
     }
     if ((this.gameOver || this.gameWon) && e.key === "Enter") this.resetGame();
   }
+
   handleKeyUp(e: KeyboardEvent) {
     this.keysState[e.key.toLowerCase()] = false;
   }
@@ -158,17 +169,17 @@ export class GameEngine {
   update() {
     if (this.gameOver || this.gameWon) return;
     this.frameCount++;
-    const room = this.getCurrentRoom();
-    if (!room) return;
+    const currentRoom = this.getCurrentRoom(); // Uses this.liveRoomsData
+    if (!currentRoom) return;
 
     if (this.dialogTimer > 0) { if (--this.dialogTimer === 0) this.dialogMessage = ""; }
     Object.keys(this.itemCooldowns).forEach(key => { if (this.itemCooldowns[key] > 0) this.itemCooldowns[key]--; });
     this.activeEffects = this.activeEffects.filter(effect => --effect.time > 0);
     this.backgroundOffset += 0.2;
 
-    this.updatePlayer(room);
-    this.updateEnemies(room);
-    this.updateProjectiles(room);
+    this.updatePlayer(currentRoom);
+    this.updateEnemies(currentRoom);
+    this.updateProjectiles(currentRoom);
     this.checkBossDefeated();
 
     if (this.transitionAlpha > 0) this.transitionAlpha -= 0.05;
@@ -192,7 +203,7 @@ export class GameEngine {
         if (!isIntersectingPortal) return;
 
         const doorKey = `${this.player.room}-${idx}`;
-        const targetRoomData = rooms[d.target];
+        const targetRoomData = this.liveRoomsData[d.target]; // Use liveRoomsData
         const targetDoorIndex = targetRoomData.doors.findIndex(door => door.target === this.player.room);
         const targetDoorKey = `${d.target}-${targetDoorIndex}`;
         const isOpened = this.openedDoors.has(doorKey) || (targetDoorIndex !== -1 && this.openedDoors.has(targetDoorKey));
@@ -222,12 +233,12 @@ export class GameEngine {
     room.items.forEach(it => {
       if (this.rectIntersect(this.player, it)) {
         this.collectItem(it);
-        if (it.type === "anvil") remainingItems.push(it);
+        if (it.type === "anvil") remainingItems.push(it); // Anvils are not consumed
       } else {
         remainingItems.push(it);
       }
     });
-    room.items = remainingItems;
+    room.items = remainingItems; // Modify items in the live room data
   }
 
   private collectItem(item: Item) {
@@ -237,6 +248,7 @@ export class GameEngine {
       case "ironScraps": this.player.materials.ironScraps++; this.showDialog("Iron Scraps collected."); break;
       case "arcaneDust": this.player.materials.arcaneDust++; this.showDialog("Arcane Dust found."); break;
       case "alchemicalReagents": this.player.materials.alchemicalReagents++; this.showDialog("Alchemical Reagents gathered."); break;
+      // Anvil is not collected, it's used.
     }
   }
 
@@ -272,14 +284,16 @@ export class GameEngine {
              e.y += (dy / dist) * e.speed * speedMult;
         }
     } else {
+        // initialPos should be Enemy | undefined if enemyInitialPositions stores Enemy[]
         const initialPos = this.enemyInitialPositions.get(this.player.room)?.[enemyIndex];
-        // Ensure initialPos and its properties are valid before using
-        if (initialPos && typeof initialPos.x === 'number' && typeof initialPos.y === 'number') {
+        // 'initialPos' contains the original static properties, including original 'x' and 'y'
+        if (initialPos) { // initialPos is Enemy here
             const rdx = initialPos.x - e.x; const rdy = initialPos.y - e.y;
             const rDist = Math.hypot(rdx, rdy) || 1;
             if (rDist > 5) {
-                e.x += (rdx / rDist) * (initialPos.speed ?? e.speed) * speedMult * 0.5; // Use initialPos.speed if available
-                e.y += (rdy / rDist) * (initialPos.speed ?? e.speed) * speedMult * 0.5;
+                // Use current enemy's speed (e.speed) for movement back, or initialPos.speed if it should be fixed
+                e.x += (rdx / rDist) * (initialPos.speed) * speedMult * 0.5;
+                e.y += (rdy / rDist) * (initialPos.speed) * speedMult * 0.5;
             }
         }
     }
@@ -366,7 +380,8 @@ export class GameEngine {
 
   render() {
     if (!this.ctx) return;
-    const room = this.getCurrentRoom(); const ctx = this.ctx;
+    const room = this.getCurrentRoom(); // Uses this.liveRoomsData
+    const ctx = this.ctx;
     this.drawBackground(room);
     room.hazards.forEach(h => { ctx.fillStyle = h.type === "spikeTrap" ? "rgba(160,40,40,0.1)" : "rgba(100,0,130,0.12)"; ctx.fillRect(h.x, h.y, h.w, h.h); });
     room.doors.forEach((d, doorIdx) => {
@@ -377,7 +392,8 @@ export class GameEngine {
             const portalAnimFactor = Math.sin(this.frameCount * 0.05 + doorIdx) * 0.05 + 1.0;
             ctx.scale(portalAnimFactor, portalAnimFactor); ctx.rotate(Math.sin(this.frameCount * 0.02 + doorIdx * 0.5) * 0.1);
             const doorKey = `${this.player.room}-${doorIdx}`;
-            const targetRoomData = rooms[d.target]; const targetDoorIndex = targetRoomData.doors.findIndex(door => door.target === this.player.room);
+            const targetRoomData = this.liveRoomsData[d.target]; // Use liveRoomsData
+            const targetDoorIndex = targetRoomData.doors.findIndex(door => door.target === this.player.room);
             const targetDoorKey = `${d.target}-${targetDoorIndex}`;
             const isOpened = this.openedDoors.has(doorKey) || (targetDoorIndex !== -1 && this.openedDoors.has(targetDoorKey));
             let portalFilter = 'none';
@@ -436,6 +452,7 @@ export class GameEngine {
       });
     }
   }
+
   private drawEndScreen(ctx: CanvasRenderingContext2D, title: string, titleColor: string, subtitle: string) {
     ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0, 0, this.W, this.H);
     ctx.font = "bold 48px 'Times New Roman', serif"; ctx.fillStyle = titleColor; ctx.textAlign = "center";
@@ -443,6 +460,7 @@ export class GameEngine {
     ctx.font = "24px 'Times New Roman', serif"; ctx.fillStyle = "lightgray";
     ctx.fillText(subtitle, this.W / 2, this.H / 2 + 20);
   }
+
   private renderProjectiles(ctx: CanvasRenderingContext2D) {
     this.activeProjectiles.forEach(p => {
       const img = this.projectileImages[p.type]; ctx.save();
@@ -452,6 +470,7 @@ export class GameEngine {
       ctx.restore();
     });
   }
+
   private renderActiveEffects(ctx: CanvasRenderingContext2D) {
     this.activeEffects.forEach(effect => {
         ctx.save();
@@ -474,30 +493,58 @@ export class GameEngine {
         ctx.restore();
     });
   }
+
   private drawBackground(room: Room) {
     const ctx = this.ctx; const g = ctx.createLinearGradient(0, 0, 0, this.H);
     g.addColorStop(0, room.bgColor1); g.addColorStop(1, room.bgColor2);
     ctx.fillStyle = g; ctx.fillRect(0, 0, this.W, this.H);
-    if (room.bgType === "skyline" && room.skylineColor) { /* ... */ }
-    else if (room.bgType === "forest" && room.fgColor) { /* ... */ }
-    else if (room.bgType === "dungeon" && room.skylineColor) { /* ... */ }
+    if (room.bgType === "skyline" && room.skylineColor) {
+        ctx.fillStyle = room.skylineColor;
+        for (let i = 0; i < 20; i++) {
+          const w = this.rand(30, 80); const h = this.rand(40, 150);
+          const xPos = ((i * (this.W / 15) - this.backgroundOffset * 0.3) % (this.W + 80)) - 40;
+          ctx.fillRect(xPos, this.H - h, w, h);
+        }
+    } else if (room.bgType === "forest" && room.fgColor) {
+        ctx.fillStyle = room.fgColor;
+        for (let i = 0; i < 10; i++) {
+          const treeWidth = this.rand(15, 30); const treeHeight = this.rand(this.H * 0.4, this.H * 0.8);
+          const xPos = ((i * (this.W/8) - this.backgroundOffset * 0.5) % (this.W + treeWidth)) - treeWidth;
+          ctx.fillRect(xPos, this.H - treeHeight, treeWidth, treeHeight);
+          ctx.beginPath(); ctx.moveTo(xPos - treeWidth/2, this.H - treeHeight);
+          ctx.lineTo(xPos + treeWidth + treeWidth/2, this.H - treeHeight);
+          ctx.lineTo(xPos + treeWidth/2, this.H - treeHeight - this.rand(40,80));
+          ctx.closePath(); ctx.fill();
+        }
+    } else if (room.bgType === "dungeon" && room.skylineColor) {
+       for (let i = 0; i < 5; i++) {
+           ctx.fillStyle = `rgba(${parseInt(room.skylineColor.slice(1,3),16)}, ${parseInt(room.skylineColor.slice(3,5),16)}, ${parseInt(room.skylineColor.slice(5,7),16)}, 0.2)`;
+           const xPos = this.rand(0, this.W); const yPos = this.rand(this.H*0.2, this.H*0.8);
+           const lightRadius = this.rand(30,70);
+           ctx.beginPath(); ctx.arc(xPos, yPos, lightRadius, 0, Math.PI*2); ctx.fill();
+       }
+    }
   }
+
   private rectIntersect(a: RectObject, b: RectObject): boolean {
     const aW = a.w ?? a.size ?? 0; const aH = a.h ?? a.size ?? 0;
     const bW = b.w ?? b.size ?? 0; const bH = b.h ?? b.size ?? 0;
     return (a.x < b.x + bW && a.x + aW > b.x && a.y < b.y + bH && a.y + aH > b.y);
   }
+
   private rand(min: number, max: number): number { return Math.random() * (max - min) + min; }
   private clamp(v: number, min: number, max: number): number { return Math.max(min, Math.min(max, v)); }
-  private getCurrentRoom(): Room { this.visitedRooms.add(this.player.room); return rooms[this.player.room]; }
+  private getCurrentRoom(): Room { this.visitedRooms.add(this.player.room); return this.liveRoomsData[this.player.room]; }
   private nearAnvil(): boolean { return this.getCurrentRoom().items.some(it => it.type === "anvil" && this.rectIntersect(this.player, it)); }
   toggleCrafting() { this.craftingMode = !this.craftingMode; this.craftSelection = 0; }
+
   private canAfford(recipeIndex: number): boolean {
     if (this.difficulty === 'peaceful') return true;
     const recipe = recipes[recipeIndex];
     for (const r of resourceTypes) if ((recipe.cost[r] ?? 0) > this.player.materials[r]) return false;
     return true;
   }
+
   attemptCraft() {
     const recipe = recipes[this.craftSelection];
     if (!this.canAfford(this.craftSelection)) { this.showDialog("You lack the required materials."); return; }
@@ -508,7 +555,7 @@ export class GameEngine {
     switch (recipe.name) {
       case "Greater Healing Potion": this.player.hp = this.player.hpMax; this.activeEffects.push({ type: "heal", x: this.player.x, y: this.player.y, time: 60 }); break;
       case "Enchanted Armor Piece": this.player.shadowResilience = Math.min(1, this.player.shadowResilience + 0.5); break;
-      case "Boots of Swiftness": this.player.speed += 1; break; // Note: useItem has an activatable version, this is permanent
+      case "Boots of Swiftness": this.player.speed += 1; break;
       case "Skeleton Key": this.player.keys += 1; break;
       case "Heavy Crossbow": this.player.inventory.heavyCrossbow = true; this.player.crossbowBolts = 5; break;
       case "Amulet of Shielding": this.player.inventory.amuletOfShielding = true; break;
@@ -521,67 +568,274 @@ export class GameEngine {
         break;
     }
   }
-  private changeRoom(index: number, dest: { x: number; y: number }) { /* ... */ }
-  private placePlayerSafely() { /* ... */ }
-  private triggerGameOver() { if (this.gameWon) return; this.player.hp = 0; this.gameOver = true; this.craftingMode = false; this.showDialog("Darkness consumes you... Press Enter to restart.", 6000); }
-  private checkBossDefeated() {
-      const currentRoomData = rooms[this.player.room];
-      if (currentRoomData.name === "The Shadow Lord's Lair") {
-          const boss = currentRoomData.enemies.find(e => e.sprite === "shadowOverlord");
-          if (boss && boss.hp <= 0 && !this.gameWon) {
-              this.gameWon = true; this.showDialog("The Shadow Overlord is VANQUISHED! Press Enter to Begin Anew.", 10000);
-              const exitPortal = currentRoomData.doors[0];
-              if (exitPortal) { const doorKey = `${this.player.room}-0`; this.openedDoors.add(doorKey); }
-          }
+
+  private changeRoom(index: number, dest: { x: number; y: number }) {
+    this.transitionAlpha = 1;
+    setTimeout(() => {
+      this.player.room = index; this.player.x = dest.x; this.player.y = dest.y;
+      this.placePlayerSafely(); this.visitedRooms.add(index); this.doorCooldown = 15;
+    }, 100);
+   }
+
+  private placePlayerSafely() {
+    const room = this.getCurrentRoom(); let moved = true; let iter = 0;
+    while (moved && iter < 8) {
+      moved = false;
+      for (const d of room.doors) {
+        if (!this.rectIntersect(this.player, d)) continue;
+        const pcx = this.player.x + this.player.size / 2; const pcy = this.player.y + this.player.size / 2;
+        const dcx = d.x + d.w / 2; const dcy = d.y + d.h / 2;
+        const overlapX = (this.player.size/2 + d.w/2) - Math.abs(pcx - dcx);
+        const overlapY = (this.player.size/2 + d.h/2) - Math.abs(pcy - dcy);
+        if (overlapX > 0 && overlapY > 0) {
+            if (overlapX < overlapY) this.player.x += Math.sign(pcx - dcx) * overlapX;
+            else this.player.y += Math.sign(pcy - dcy) * overlapY;
+            moved = true;
+        }
       }
+      iter++;
+    }
+    this.player.x = this.clamp(this.player.x, 0, this.W - this.player.size);
+    this.player.y = this.clamp(this.player.y, 0, this.H - this.player.size);
   }
-  saveGame(force = false) { /* ... */ }
-  loadGame() { /* ... */ }
-  setDifficulty(difficulty: 'peaceful' | 'easy' | 'normal' | 'hard') { /* ... */ }
 
-  resetGame() {
-    this.player = {
-      x: 50, y: 300, size: 48, speed: 4, room: 0, hp: 100, hpMax: 100, keys: 0,
-      shadowResilience: 0, materials: { ironScraps: 0, arcaneDust: 0, alchemicalReagents: 0 },
-      inventory: {}, crossbowBolts: 0, isInvincible: false, damageMultiplier: 1,
-    };
-    this.visitedRooms = new Set([0]); this.openedDoors.clear(); this.gameOver = false;
-    this.gameWon = false; this.craftingMode = false; this.transitionAlpha = 0;
-    this.doorCooldown = 0; this.dialogMessage = ""; this.dialogTimer = 0;
-    this.itemCooldowns = {}; this.activeEffects = []; this.activeProjectiles = [];
-    this.selectedItem = 0; this.craftSelection = 0; this.frameCount = 0;
+  private triggerGameOver() { if (this.gameWon) return; this.player.hp = 0; this.gameOver = true; this.craftingMode = false; this.showDialog("Darkness consumes you... Press Enter to restart.", 6000); }
 
-    // Corrected enemy reset logic:
-    rooms.forEach((roomData, roomIdx) => {
-        const initialEnemyStatesForRoom = this.enemyInitialPositions.get(roomIdx);
-        if (initialEnemyStatesForRoom) {
-            roomData.enemies = initialEnemyStatesForRoom.map(initialState => {
-                // initialState is already a complete Enemy object from the constructor's map
+// Inside your GameEngine class
+  private checkBossDefeated() {
+    const currentRoomData: Room = this.liveRoomsData[this.player.room];
+    if (currentRoomData.name === "The Shadow Lord's Lair") {
+        const enemiesList: Enemy[] = currentRoomData.enemies;
+        const boss: Enemy | undefined = enemiesList.find(
+            (e: Enemy) => e.sprite === "shadowOverlord"
+        );
+
+        if (boss) { // Type guard: boss is now Enemy (not undefined)
+            // Accessing boss.hp, boss.sprite, etc., is safe here
+            if (boss.hp <= 0 && !this.gameWon) {
+                this.gameWon = true;
+                this.showDialog("The Shadow Overlord is VANQUISHED! Press Enter to Begin Anew.", 10000);
+                const exitPortal = currentRoomData.doors[0];
+                if (exitPortal) {
+                    const doorKey = `${this.player.room}-0`;
+                    this.openedDoors.add(doorKey);
+                }
+            }
+        }
+    }
+  }
+
+  saveGame(force = false) {
+    const now = performance.now();
+    if (!force && now - this.lastSaveTime < 20_000) return;
+    this.lastSaveTime = now;
+    try {
+        localStorage.setItem("knightfallSave_v1", JSON.stringify({
+            playerState: this.player,
+            visitedRooms: Array.from(this.visitedRooms),
+            openedDoors: Array.from(this.openedDoors),
+            difficulty: this.difficulty,
+            // Note: enemy states and live item states are not saved here explicitly.
+            // They would be reset or re-derived on load based on gameDataRooms logic or would need specific saving.
+            // For a simple save, this might be acceptable if `loadGame` re-initializes room states.
+          })
+        );
+    } catch (e) {
+        console.error("Error saving game:", e);
+        this.showDialog("Failed to save game progress.", 120);
+    }
+  }
+
+  loadGame() {
+    const raw = localStorage.getItem("knightfallSave_v1");
+    if (!raw) return;
+    try {
+      const savedData = JSON.parse(raw);
+      if (savedData.playerState) {
+          this.player = {...this.player, ...savedData.playerState};
+          this.player.materials = {...this.player.materials, ...(savedData.playerState.materials || {})};
+          this.player.inventory = {...this.player.inventory, ...(savedData.playerState.inventory || {})};
+      }
+      this.visitedRooms = new Set<number>(savedData.visitedRooms ?? [0]);
+      this.openedDoors = new Set<string>(savedData.openedDoors ?? []);
+      this.difficulty = savedData.difficulty ?? "normal";
+      // Important: After loading player position and room, reset current room's dynamic state (enemies, items)
+      // or implement full room state saving/loading. For simplicity, we'll re-initialize from defaults.
+      this.liveRoomsData = JSON.parse(JSON.stringify(gameDataRooms)); // Reset all room states to default
+      this.resetEnemies(); // Re-populate live enemies based on initial definitions for current difficulty
+      this.resetItems();   // Re-populate live items
+
+      this.placePlayerSafely();
+      this.showDialog("Game loaded successfully!");
+    } catch (e) {
+      console.error("Failed to load Knightfall save:", e);
+      localStorage.removeItem("knightfallSave_v1");
+      this.showDialog("Failed to load save data. Starting new game.");
+      this.resetGame(); // Fallback to a new game
+    }
+  }
+
+  setDifficulty(difficulty: 'peaceful' | 'easy' | 'normal' | 'hard') {
+    this.difficulty = difficulty;
+    if (difficulty === 'peaceful') {
+      this.player.materials = { ironScraps: 99, arcaneDust: 99, alchemicalReagents: 99 };
+      this.player.hp = this.player.hpMax;
+    }
+    // Consider resetting the game or enemies if difficulty changes mid-game
+    // For now, it only affects new interactions and player material boost.
+  }
+
+
+  // Inside your GameEngine class
+  private resetEnemies() {
+    this.liveRoomsData.forEach((roomData, roomIdx) => {
+        const initialEnemyConfigurations = this.enemyInitialPositions.get(roomIdx);
+        // initialEnemyConfigurations should be Enemy[] here due to the corrected typing
+
+        if (initialEnemyConfigurations) {
+            roomData.enemies = initialEnemyConfigurations.map((initialState: Enemy): Enemy => {
+                // initialState is now guaranteed to be a full Enemy object
                 return {
-                    ...initialState, // Spread all properties from the stored initial state
-                    hp: initialState.hpMax, // Reset hp to full from its specific hpMax
-                    lastAttackTime: 0,
-                    isLunging: false,
+                    ...initialState,         // Spread all properties from the stored (complete) initial state.
+                    hp: initialState.hpMax, // Reset current hp to max. hpMax is guaranteed on Enemy.
+                                            // lastAttackTime: 0 and isLunging: false are already correctly set in initialState.
                 };
             });
+            // No 'as Enemy[]' type assertion should be needed if types are correct.
         } else {
-            // Fallback if a room somehow has no entry in enemyInitialPositions
-            // This ideally shouldn't happen if constructor populates for all rooms.
+            // This case implies a room was defined in gameDataRooms but didn't get an entry
+            // in enemyInitialPositions, which would be an issue in the constructor.
             roomData.enemies = [];
         }
     });
+  }
 
-    rooms.forEach((room, i) => {
-        const originalRoomDataFile = rooms[i]; // Assuming rooms from import is the pristine version
-        // Create a deep copy of items to prevent mutation issues if game-data is somehow altered
-        // This is a simplified way; a true deep clone might be safer if item objects have nested structures.
-        room.items = JSON.parse(JSON.stringify(originalRoomDataFile.items)).map((item: Item) => ({...item}));
+  private resetItems() {
+    this.liveRoomsData.forEach((liveRoom, roomIdx) => {
+        const pristineRoomData = gameDataRooms[roomIdx];
+        if (pristineRoomData && pristineRoomData.items) {
+            liveRoom.items = JSON.parse(JSON.stringify(pristineRoomData.items));
+        } else {
+            liveRoom.items = [];
+        }
     });
+  }
+
+
+  resetGame() {
+    this.player = {
+      x: 50, y: 300, size: 48, speed: 4, room: 0, hp: 100, hpMax: 100,
+      keys: 0, shadowResilience: 0,
+      materials: { ironScraps: 0, arcaneDust: 0, alchemicalReagents: 0 },
+      inventory: {}, crossbowBolts: 0, isInvincible: false, damageMultiplier: 1,
+    };
+    this.visitedRooms = new Set([0]); this.openedDoors.clear();
+    this.gameOver = false; this.gameWon = false; this.craftingMode = false;
+    this.transitionAlpha = 0; this.doorCooldown = 0;
+    this.dialogMessage = ""; this.dialogTimer = 0;
+    this.itemCooldowns = {}; this.activeEffects = []; this.activeProjectiles = [];
+    this.selectedItem = 0; this.craftSelection = 0; this.frameCount = 0;
+
+    // Re-initialize live room data from pristine game data
+    this.liveRoomsData = JSON.parse(JSON.stringify(gameDataRooms));
+    // Re-initialize enemyInitialPositions based on the fresh pristine data
+    this.liveRoomsData.forEach((room, idx) => {
+      this.enemyInitialPositions.set(
+        idx,
+        room.enemies.map((e: Enemy): Enemy => ({
+            ...e,
+            lastAttackTime: 0,
+            isLunging: false,
+        }))
+      );
+    });
+    this.resetEnemies(); // Populate live enemies based on the new initial positions
+    // Items are already reset by liveRoomsData deep copy.
+
     localStorage.removeItem("knightfallSave_v1");
     this.showDialog("A new adventure begins!");
   }
 
-  private useItem(itemName: string) { /* ... */ }
+  private useItem(itemName: string) {
+    if (this.player.inventory[itemName] !== true || (this.itemCooldowns[itemName] ?? 0) > 0) {
+        if (this.player.inventory[itemName] !== true) this.showDialog(`You don't have ${itemName}.`);
+        else this.showDialog(`${itemName} is still on cooldown.`);
+        return;
+    }
+    switch (itemName) {
+      case "heavyCrossbow":
+        if (this.player.crossbowBolts <= 0) { this.showDialog("Out of Crossbow Bolts!"); return; }
+        const room = this.getCurrentRoom(); let closestEnemy: Enemy | null = null; let minDist = Infinity;
+        room.enemies.forEach(e => {
+          if (e.hp > 0) {
+            const dist = Math.hypot(this.player.x - e.x, this.player.y - e.y);
+            if (dist < minDist && dist < 400) { minDist = dist; closestEnemy = e; }
+          }
+        });
+        if (closestEnemy) {
+          closestEnemy.hp -= 50 * this.player.damageMultiplier;
+          this.showDialog(`Fired a bolt at ${closestEnemy.sprite || 'a monster'}!`);
+          this.activeEffects.push({ type: "crossbowBolt", x: closestEnemy.x + closestEnemy.size/2 , y: closestEnemy.y + closestEnemy.size/2, time: 20 });
+          if (closestEnemy.hp <=0) this.showDialog(`${closestEnemy.sprite || 'The monster'} has been vanquished!`);
+        } else { this.showDialog("No target in range for the crossbow."); return; }
+        this.player.crossbowBolts--; this.itemCooldowns[itemName] = 90;
+        break;
+      case "bootsOfSwiftness_ACTIVATABLE": // Example, ensure this item name matches actual craftable/inventory items
+        const originalSpeed = this.player.speed;
+        // Check if permanent boots already applied
+        const baseSpeed = this.player.inventory.bootsOfSwiftness === true ? originalSpeed -1 : originalSpeed;
+        this.player.speed = baseSpeed * 1.5;
+
+        this.itemCooldowns[itemName] = 600; this.showDialog("Boots of Swiftness activated!");
+        this.activeEffects.push({ type: "swiftness", x: this.player.x, y: this.player.y, time: 300 });
+        setTimeout(() => { this.player.speed = this.player.inventory.bootsOfSwiftness === true ? baseSpeed +1 : baseSpeed; }, 5000);
+        break;
+      case "amuletOfShielding":
+        this.player.isInvincible = true; this.itemCooldowns[itemName] = 900;
+        this.showDialog("Amulet of Shielding activated! You are invulnerable!");
+        this.activeEffects.push({ type: "shielding", x: this.player.x, y: this.player.y, time: 300 });
+        setTimeout(() => { this.player.isInvincible = false; this.showDialog("The Amulet's protection fades."); }, 5000);
+        break;
+      case "orbOfRevealing":
+        const currentRoomHazards = this.getCurrentRoom().hazards; let foundHazard = false;
+        currentRoomHazards.forEach(h => { this.activeEffects.push({ type: "curseScan", x: h.x + h.w/2, y: h.y + h.h/2, time: 240, size: Math.max(h.w, h.h) }); foundHazard = true; });
+        if (foundHazard) this.showDialog("The Orb of Revealing shimmers, outlining cursed areas!");
+        else this.showDialog("The Orb of Revealing finds no cursed areas nearby.");
+        this.itemCooldowns[itemName] = 450;
+        break;
+      case "berserkersDraught":
+        const originalDamageMult = this.player.damageMultiplier; this.player.damageMultiplier *= 2;
+        this.itemCooldowns[itemName] = 720; this.showDialog("Berserker's Draught consumed! Your attacks feel mightier!");
+        this.activeEffects.push({ type: "berserk", x: this.player.x, y: this.player.y, time: 420 });
+        setTimeout(() => { this.player.damageMultiplier = originalDamageMult; this.showDialog("The berserk rage subsides."); }, 7000);
+        break;
+      case "runeOfParalysis":
+        const roomForStun = this.getCurrentRoom(); let stunnedSomeone = false;
+        roomForStun.enemies.forEach(e => {
+          if (e.hp > 0 && e.speed > 0) { // Check if already stunned (speed > 0)
+            const initialEnemyData = this.enemyInitialPositions.get(this.player.room)?.find(initialE => initialE.x === e.x && initialE.y === e.y);
+            const originalEnemySpeed = initialEnemyData?.speed ?? e.speed; // Fallback to current speed if not found
+            e.speed = 0; stunnedSomeone = true;
+            this.activeEffects.push({ type: "paralysis", x: e.x + e.size/2, y: e.y + e.size/2, time: 180, size: e.size });
+            setTimeout(() => { if(e.hp > 0) e.speed = originalEnemySpeed; }, 3000);
+          }
+        });
+        if(stunnedSomeone) this.showDialog("Rune of Paralysis activated! Enemies are stunned!");
+        else this.showDialog("No enemies nearby to paralyze.");
+        this.itemCooldowns[itemName] = 600;
+        break;
+    }
+  }
+
   private showDialog(message: string, duration = 240) { this.dialogMessage = message; this.dialogTimer = duration; }
-  private wrapText(context: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) { /* ... */ }
+
+  private wrapText(context: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
+    const words = text.split(' '); let line = ''; let currentY = y; context.textBaseline = 'middle';
+    for (let n = 0; n < words.length; n++) {
+      const testLine = line + words[n] + ' '; const metrics = context.measureText(testLine); const testWidth = metrics.width;
+      if (testWidth > maxWidth && n > 0) { context.fillText(line.trim(), x, currentY); line = words[n] + ' '; currentY += lineHeight; }
+      else { line = testLine; }
+    }
+    context.fillText(line.trim(), x, currentY);
+  }
 }
